@@ -12,166 +12,49 @@ import SwiftUI
 struct PreferencesView: View {
     @Binding var captureSettings: CaptureSettings
     @Binding var upscaleSettings: UpscaleSettings
-    @State private var targetType: String = "Display"
+
+    @State private var targetType = "Display"
     @State private var availableWindows: [(id: CGWindowID, title: String)] = []
     @State private var availableDisplays: [(id: CGDirectDisplayID, name: String)] = []
     @State private var selectedWindowID: CGWindowID?
     @State private var selectedDisplayID: CGDirectDisplayID?
-    @State private var isLoading: Bool = false
-    @State private var showDebugHUD: Bool = true
+    @State private var isLoading = false
+    @State private var showDebugHUD = true
     @State private var showDiagnostics = false
 
-    private let verticalLabelSpacing: CGFloat = 8
+    private var vsrTargetBinding: Binding<AppleVSRTargetMode> {
+        Binding(
+            get: { AppCoordinator.shared.appleVSRTargetMode },
+            set: { mode in
+                AppCoordinator.shared.setAppleVSRTargetMode(mode)
+                upscaleSettings.targetResolution =
+                    AppCoordinator.shared.resolvedAppleVSRTargetResolution()
+            }
+        )
+    }
 
     var body: some View {
         Form {
-            // MARK: - Capture
-
-            Section {
-                Picker("Capture Type", selection: $targetType) {
-                    Text("Display").tag("Display")
-                    Text("Window").tag("Window")
-                }
-                .onChange(of: targetType) { _, newValue in
-                    if newValue == "Window" {
-                        captureSettings.targetDisplayID = nil
-                    } else {
-                        captureSettings.targetWindowID = nil
-                    }
-                    loadAvailableTargets()
-                }
-
-                if targetType == "Window" {
-                    if isLoading {
-                        Text("Loading windows...")
-                            .foregroundColor(.secondary)
-                    } else {
-                        Picker("Window", selection: Binding(
-                            get: { selectedWindowID },
-                            set: { newValue in
-                                selectedWindowID = newValue
-                                captureSettings.targetWindowID = newValue
-                                captureSettings.targetDisplayID = nil
-                            }
-                        )) {
-                            Text("Select a window...").tag(nil as CGWindowID?)
-                            ForEach(availableWindows, id: \.id) { window in
-                                Text(window.title)
-                                    .tag(window.id as CGWindowID?)
-                            }
-                        }
-                    }
-                } else {
-                    if isLoading {
-                        Text("Loading displays...")
-                            .foregroundColor(.secondary)
-                    } else {
-                        Picker("Display", selection: Binding(
-                            get: { selectedDisplayID },
-                            set: { newValue in
-                                selectedDisplayID = newValue
-                                captureSettings.targetDisplayID = newValue
-                                captureSettings.targetWindowID = nil
-                            }
-                        )) {
-                            Text("Select a display...").tag(nil as CGDirectDisplayID?)
-                            ForEach(availableDisplays, id: \.id) { display in
-                                Text(display.name)
-                                    .tag(display.id as CGDirectDisplayID?)
-                            }
-                        }
-                    }
-                }
-
-                Stepper("Capture FPS: \(captureSettings.frameRate)",
-                        value: $captureSettings.frameRate,
-                        in: 30...120, step: 30)
-
-                HStack {
-                    Button("Refresh") {
-                        loadAvailableTargets()
-                    }
-                    Button("Content Picker") {
-                        if #available(macOS 12.3, *) {
-                            AppCoordinator.shared.presentPicker()
-                        }
-                    }
-                }
-            } header: {
-                HeaderView("Capture")
-            }
-
-            // MARK: - Processing
-
-            Section {
-                Picker("Mode", selection: $upscaleSettings.mode) {
-                    Text("Passthrough").tag(UpscaleMode.temporal)
-                    Text("Frame Interpolation").tag(UpscaleMode.frameInterpolation)
-                }
-
-                if upscaleSettings.mode == .frameInterpolation {
-                    Picker("Processing Resolution", selection: $upscaleSettings.processingResolution) {
-                        ForEach(ProcessingResolution.allCases, id: \.self) { res in
-                            Text(res.rawValue).tag(res)
-                        }
-                    }
-
-                    resolutionWarning
-
-                    Stepper("Multiplier: \(upscaleSettings.interpolationMultiplier)x",
-                            value: $upscaleSettings.interpolationMultiplier,
-                            in: 2...4, step: 1)
-
-                    if upscaleSettings.interpolationMultiplier > 2 {
-                        Label(
-                            "Multipliers above 2x may cause worse performance, quality, or latency. 2x is recommended.",
-                            systemImage: "exclamationmark.triangle"
-                        )
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                    }
-
-                    Text("\(captureSettings.frameRate) fps capture → \(upscaleSettings.targetFrameRate(sourceFrameRate: captureSettings.frameRate)) fps output")
-                        .foregroundColor(.secondary)
-                        .font(.caption)
-                }
-            } header: {
-                HeaderView("Processing")
-            }
-
-            // MARK: - Debug
-
-            Section {
-                Toggle("Show Debug HUD", isOn: $showDebugHUD)
-                    .onChange(of: showDebugHUD) { _, newValue in
-                        AppCoordinator.shared.setDebugOverlay(newValue)
-                    }
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Button("Run Device Diagnostics...") {
-                        showDiagnostics = true
-                    }
-                    Text("Help us improve the app")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            } header: {
-                HeaderView("Debug")
-            }
+            captureSection
+            processingSection
+            debugSection
         }
         .formStyle(.grouped)
-        .frame(width: 400)
+        .frame(width: 430)
         .fixedSize(horizontal: false, vertical: true)
-        .onChange(of: upscaleSettings.mode) { _, _ in
-            AppCoordinator.shared.updateUpscaleSettings(upscaleSettings)
-            restartCaptureIfNeeded()
+        .onChange(of: upscaleSettings.superResolutionEnabled) { _, enabled in
+            AppCoordinator.shared.setAppleVSREnabled(enabled)
+        }
+        .onChange(of: upscaleSettings.frameInterpolationEnabled) { _, enabled in
+            AppCoordinator.shared.setFrameInterpolationEnabled(enabled)
         }
         .onChange(of: upscaleSettings.interpolationMultiplier) { _, _ in
             AppCoordinator.shared.updateUpscaleSettings(upscaleSettings)
-            restartCaptureIfNeeded()
+            AppCoordinator.shared.resetFrameInterpolator()
         }
         .onChange(of: upscaleSettings.processingResolution) { _, _ in
             AppCoordinator.shared.updateUpscaleSettings(upscaleSettings)
-            restartCaptureIfNeeded()
+            AppCoordinator.shared.resetFrameInterpolator()
         }
         .onChange(of: captureSettings.frameRate) { _, _ in
             restartCaptureIfNeeded()
@@ -191,8 +74,259 @@ struct PreferencesView: View {
             } else {
                 targetType = "Display"
             }
-            showDebugHUD = AppCoordinator.shared.overlayManager?.showDebugOverlay ?? true
+
+            showDebugHUD =
+                AppCoordinator.shared.overlayManager?.showDebugOverlay ?? true
             loadAvailableTargets()
+        }
+    }
+
+    // MARK: - Capture
+
+    private var captureSection: some View {
+        Section {
+            Picker("Capture Type", selection: $targetType) {
+                Text("Display").tag("Display")
+                Text("Window").tag("Window")
+            }
+            .onChange(of: targetType) { _, newValue in
+                if newValue == "Window" {
+                    captureSettings.targetDisplayID = nil
+                } else {
+                    captureSettings.targetWindowID = nil
+                }
+                loadAvailableTargets()
+            }
+
+            if targetType == "Window" {
+                windowPicker
+            } else {
+                displayPicker
+            }
+
+            Stepper(
+                "Capture FPS: \(captureSettings.frameRate)",
+                value: $captureSettings.frameRate,
+                in: 30...120,
+                step: 30
+            )
+
+            HStack {
+                Button("Refresh") {
+                    loadAvailableTargets()
+                }
+
+                Button("Content Picker") {
+                    if #available(macOS 12.3, *) {
+                        AppCoordinator.shared.presentPicker()
+                    }
+                }
+            }
+        } header: {
+            HeaderView("Capture")
+        }
+    }
+
+    @ViewBuilder
+    private var windowPicker: some View {
+        if isLoading {
+            Text("Loading windows...")
+                .foregroundColor(.secondary)
+        } else {
+            Picker(
+                "Window",
+                selection: Binding(
+                    get: { selectedWindowID },
+                    set: { newValue in
+                        selectedWindowID = newValue
+                        captureSettings.targetWindowID = newValue
+                        captureSettings.targetDisplayID = nil
+                    }
+                )
+            ) {
+                Text("Select a window...").tag(nil as CGWindowID?)
+                ForEach(availableWindows, id: \.id) { window in
+                    Text(window.title).tag(window.id as CGWindowID?)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var displayPicker: some View {
+        if isLoading {
+            Text("Loading displays...")
+                .foregroundColor(.secondary)
+        } else {
+            Picker(
+                "Display",
+                selection: Binding(
+                    get: { selectedDisplayID },
+                    set: { newValue in
+                        selectedDisplayID = newValue
+                        captureSettings.targetDisplayID = newValue
+                        captureSettings.targetWindowID = nil
+                    }
+                )
+            ) {
+                Text("Select a display...").tag(nil as CGDirectDisplayID?)
+                ForEach(availableDisplays, id: \.id) { display in
+                    Text(display.name).tag(display.id as CGDirectDisplayID?)
+                }
+            }
+        }
+    }
+
+    // MARK: - Processing
+
+    private var processingSection: some View {
+        Section {
+            Toggle(
+                "Apple Video Super Resolution",
+                isOn: $upscaleSettings.superResolutionEnabled
+            )
+
+            if upscaleSettings.superResolutionEnabled {
+                vsrControls
+            }
+
+            Divider()
+
+            Toggle(
+                "Frame Interpolation",
+                isOn: $upscaleSettings.frameInterpolationEnabled
+            )
+
+            if upscaleSettings.frameInterpolationEnabled {
+                interpolationControls
+            }
+
+            if upscaleSettings.superResolutionEnabled,
+               upscaleSettings.frameInterpolationEnabled
+            {
+                Label(
+                    "Combined pipeline: Frame Interpolation → Apple VSR",
+                    systemImage: "arrow.trianglehead.2.clockwise.rotate.90"
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+        } header: {
+            HeaderView("Processing")
+        }
+    }
+
+    @ViewBuilder
+    private var vsrControls: some View {
+        if #available(macOS 26.0, *) {
+            if VTLowLatencySuperResolutionScalerConfiguration.isSupported {
+                Label(
+                    "Apple VideoToolbox VSR is available on this Mac.",
+                    systemImage: "checkmark.circle.fill"
+                )
+                .font(.caption)
+                .foregroundColor(.green)
+            } else {
+                Label(
+                    "Apple VideoToolbox VSR is not supported on this Mac.",
+                    systemImage: "xmark.circle.fill"
+                )
+                .font(.caption)
+                .foregroundColor(.red)
+            }
+
+            Picker("VSR Target", selection: vsrTargetBinding) {
+                Text("Auto (Retina display)")
+                    .tag(AppleVSRTargetMode.automatic)
+                Text("2560×1440")
+                    .tag(AppleVSRTargetMode.p1440)
+                Text("3840×2160")
+                    .tag(AppleVSRTargetMode.p2160)
+            }
+
+            if AppCoordinator.shared.appleVSRTargetMode == .automatic {
+                let target = AppCoordinator.shared.resolvedAppleVSRTargetResolution()
+                Text(
+                    "Auto target: \(Int(target.width))×\(Int(target.height))"
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+
+            Text(
+                "MetalDuck automatically chooses the largest model input and "
+                    + "scale factor accepted by Apple's low-latency ML scaler."
+            )
+            .font(.caption)
+            .foregroundColor(.secondary)
+        } else {
+            Label(
+                "Apple Video Super Resolution requires macOS 26 or later.",
+                systemImage: "exclamationmark.triangle"
+            )
+            .font(.caption)
+            .foregroundColor(.orange)
+        }
+    }
+
+    private var interpolationControls: some View {
+        Group {
+            Picker(
+                "Processing Resolution",
+                selection: $upscaleSettings.processingResolution
+            ) {
+                ForEach(ProcessingResolution.allCases, id: \.self) { resolution in
+                    Text(resolution.rawValue).tag(resolution)
+                }
+            }
+
+            resolutionWarning
+
+            Stepper(
+                "Multiplier: \(upscaleSettings.interpolationMultiplier)x",
+                value: $upscaleSettings.interpolationMultiplier,
+                in: 2...4,
+                step: 1
+            )
+
+            if upscaleSettings.interpolationMultiplier > 2 {
+                Label(
+                    "Multipliers above 2x may increase latency or reduce quality. "
+                        + "2x is recommended.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundColor(.orange)
+            }
+
+            Text(
+                "\(captureSettings.frameRate) fps capture → "
+                    + "\(upscaleSettings.targetFrameRate(sourceFrameRate: captureSettings.frameRate)) fps output"
+            )
+            .font(.caption)
+            .foregroundColor(.secondary)
+        }
+    }
+
+    // MARK: - Debug
+
+    private var debugSection: some View {
+        Section {
+            Toggle("Show Debug HUD", isOn: $showDebugHUD)
+                .onChange(of: showDebugHUD) { _, newValue in
+                    AppCoordinator.shared.setDebugOverlay(newValue)
+                }
+
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Button("Run Device Diagnostics...") {
+                    showDiagnostics = true
+                }
+                Text("Help us improve the app")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        } header: {
+            HeaderView("Debug")
         }
     }
 
@@ -200,14 +334,17 @@ struct PreferencesView: View {
 
     @ViewBuilder
     private var resolutionWarning: some View {
-        let db = DeviceCapabilityDatabase.shared
-        let support = db.frameInterpolationSupport(for: upscaleSettings.processingResolution)
-        let recommended = db.recommendedFrameInterpolationResolution()
+        let database = DeviceCapabilityDatabase.shared
+        let support = database.frameInterpolationSupport(
+            for: upscaleSettings.processingResolution
+        )
+        let recommended = database.recommendedFrameInterpolationResolution()
 
         switch support {
         case .knownUnsupported:
             Label(
-                "Not supported on this device — a lower resolution will be set automatically.",
+                "Not supported on this device — a lower resolution will be "
+                    + "selected automatically.",
                 systemImage: "xmark.circle"
             )
             .font(.caption)
@@ -215,7 +352,8 @@ struct PreferencesView: View {
 
         case .unknown:
             Label(
-                "Support is unknown for this device. A lower resolution will be set automatically if it fails.",
+                "Support is unknown. MetalDuck will fall back automatically "
+                    + "if the selected resolution fails.",
                 systemImage: "questionmark.circle"
             )
             .font(.caption)
@@ -230,9 +368,11 @@ struct PreferencesView: View {
             .foregroundColor(.secondary)
 
         case .knownSupported:
-            if let rec = recommended, rec != upscaleSettings.processingResolution {
+            if let recommended,
+               recommended != upscaleSettings.processingResolution
+            {
                 Label(
-                    "Recommended for this device: \(rec.rawValue)",
+                    "Recommended for this device: \(recommended.rawValue)",
                     systemImage: "lightbulb"
                 )
                 .font(.caption)
@@ -243,6 +383,7 @@ struct PreferencesView: View {
 
     private func restartCaptureIfNeeded() {
         guard AppCoordinator.shared.appState.isCapturing else { return }
+
         Task {
             await AppCoordinator.shared.stopCapture()
             await AppCoordinator.shared.startCapture()
@@ -256,15 +397,21 @@ struct PreferencesView: View {
         Task {
             if targetType == "Window" {
                 let windows = await ScreenCaptureManager.getAvailableWindows()
+
                 await MainActor.run {
                     availableWindows = windows.compactMap { window in
                         guard window.isOnScreen,
                               window.frame.width > 100,
                               window.frame.height > 100
-                        else { return nil }
+                        else {
+                            return nil
+                        }
 
                         let appName = window.owningApplication?.applicationName
-                        let title = window.title?.isEmpty == false ? window.title! : nil
+                        let title = window.title?.isEmpty == false
+                            ? window.title!
+                            : nil
+
                         let displayName: String
                         if let title, let appName {
                             displayName = "\(appName) — \(title)"
@@ -280,12 +427,14 @@ struct PreferencesView: View {
                 }
             } else {
                 let displays = await ScreenCaptureManager.getAvailableDisplays()
+
                 await MainActor.run {
                     availableDisplays = displays.map { display in
                         let displayID = display.displayID
                         let width = Int(display.width)
                         let height = Int(display.height)
-                        let name = "Display \(displayID) (\(width)x\(height))"
+                        let name =
+                            "Display \(displayID) (\(width)x\(height))"
                         return (id: displayID, name: name)
                     }
                     isLoading = false
